@@ -1,0 +1,224 @@
+echo "Run new bash"
+
+umask 002
+
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
+export LANGUAGE=en_US.UTF-8
+
+# Terminal settings
+if [ -e ~/.terminfo/x/xterm-24bit ]; then
+  export TERM='xterm-24bit'
+elif [ -e /usr/share/terminfo/x/xterm-256color ]; then
+  export TERM='xterm-256color'
+else
+  export TERM='xterm-color'
+fi
+
+export PS1='\[\033[01;32m\]\u\[\033[01;33m\][`cc-git-print`]\[\033[01;32m\]@\h\[\033[00m\]:\[\033[01;34m\]\w\$\[\033[00m\] '
+
+# misc
+
+unalias -a
+
+ulimit -c unlimited
+
+alias ls="ls -F --color"
+alias ll="ls -lF --color"
+alias la="ls -alF --color"
+alias grep="grep --color=auto"
+
+export HISTFILESIZE=30000
+export HISTSIZE=30000
+
+alias vi=vim
+
+shopt -s histreedi
+
+# Git
+
+alias cdhome="cd /proj/tn/home/$USER"
+alias cdws="cd /workspace/git/$USER"
+
+alias git-log="git log --graph  --color --decorate --oneline --all --dense --date=local | less -R"
+alias git-sub="git submodule update --init --recursive --jobs 10"
+alias git-pull="git pull -r ; git pull -r && git-sub"
+alias git-push-for="git push origin HEAD:refs/for/`git symbolic-ref HEAD 2> /dev/null | sed -e 's,.*/\(.*\),\1,'`"
+alias git-push-draft="git push origin HEAD:refs/drafts/`git symbolic-ref HEAD 2> /dev/null | sed -e 's,.*/\(.*\),\1,'`"
+
+# docker - completion
+if [ -f ~/.bashrc_docker_completion ]; then
+    . ~/.bashrc_docker_completion
+fi
+
+# kubectl - completion
+source <(kubectl completion bash)
+
+# helm - completion
+source <(helm completion bash)
+
+
+# functions
+
+run-emacs()
+{
+  if [ `ps aux | grep "emacs --daemon=$USER" | wc -l` -eq 1 ]; then
+    emacs --daemon=$USER
+  fi
+  emacsclient -s $USER -t
+}
+
+find-and-replace()
+{
+    if [ -z $1 ]; then
+        echo "HELP: find-and-replace [path] [find string] [replace to]"
+        return 0
+    fi
+
+    find $1 \( -type d -name .git -prune \) -o -type f -print0 | xargs -0 sed -i "s@$2@$3@g"
+}
+
+cc-git-print()
+{
+  branch=`git symbolic-ref HEAD 2> /dev/null | sed -e 's,.*/\(.*\),\1,'`
+  if [ -n "$branch" ]; then
+    local=`git rev-parse ${branch}`
+    origin=`git rev-parse origin/${branch}`
+    if [ "$local" = "$origin" ]; then
+      echo ${branch}
+      return
+    else
+      echo "${branch} !"
+      return
+    fi
+  else
+    branch=`git branch 2> /dev/null | cut -d\  -f5`
+    echo ${branch%?}
+    return
+  fi
+
+  echo "NA"
+}
+
+FTP_IP_ADDR=
+FTP_USER=
+FTP_PASS=
+FTP_DEST_DIR="/data/$USER"
+
+upload-ftp()
+{
+  lftp -u $FTP_USER,$FTP_PASS -e "cd $FTP_DEST_DIR;put $1/$2;by" $FTP_IP_ADDR
+}
+
+upload-to-ftp()
+{
+  target=$1
+  cmake_path=$2
+
+  case $target in
+    crypto|ssl)
+      target_path=$cmake_path"/output/lib/"
+      target_name="lib$target.so"
+      ;;
+
+    spi)
+#      retval="./output/mod"
+      echo "ERROR: not supported"
+      return 1
+      ;;
+    *)
+      target_path=$cmake_path"/output/bin/"
+      target_name=$target
+      ;;
+  esac
+
+  echo "INFO: upload $target_path$target_name of target $target"
+
+  lftp -u $FTP_USER,$FTP_PASS -e "cd $FTP_DEST_DIR;put $target_path$target_name;by" $FTP_IP_ADDR
+}
+
+cmake-own()
+{
+  arch=$1
+  build_type=$2
+
+  shift
+  shift
+  targets=$*
+
+  if [ -z $build_type ] || [[ $build_type =~ help ]]; then
+    echo "HELP: cmake-own [e5500|armeb|x86-gcc_7_3_0] [release|debug] [target(s)]"
+    return 0
+  fi
+
+  if ! cmake-init $arch $build_type; then
+    return 1
+  fi
+
+  # get the project dir
+  if [[ `pwd` =~ ^($GIT_HUB_HOME)/(.*) ]]; then
+    project_dir=`echo ${BASH_REMATCH[2]} | cut -d "/" -f1`
+  else
+    echo "ERROR: Not in project"
+    return 1
+  fi
+
+  cmake_home="$GIT_HUB_HOME/$project_dir/cmake-$arch-$build_type"
+
+  ret_val=0
+  for target in $targets; do
+    echo "INFO: building the $target"
+    if [[ $target == *"test"* ]]; then
+	rm -f ./output/bin/$target
+    fi
+    cmake_cmd="cmake --build $cmake_home --parallel `nproc` --target $target"
+    echo "INFO: execute cmake: $cmake_cmd"
+    $cmake_cmd && [[ ! $arch =~ "x86" ]] && upload-to-ftp $target $cmake_home
+    if [[ $target == *"test"* ]]; then
+	$cmake_home/output/bin/$target
+    fi
+  done
+
+  return 0 # TODO valid return value
+}
+
+cmake-init()
+{
+  arch=$1
+  build_type=$2
+
+  cmake_cmd="cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -DCMAKE_BUILD_TYPE="
+  case $build_type in
+    debug)
+      cmake_cmd=$cmake_cmd"Debug"
+      ;;
+    release)
+      cmake_cmd=$cmake_cmd"Release"
+      ;;
+    *)
+      echo "HELP: cmake-init [e5500|armeb|x86-gcc_7_3_0] [release|debug]"
+      return 0
+      ;;
+  esac
+
+  # get the project dir
+  if [[ `pwd` =~ ^($GIT_HUB_HOME)/(.*) ]]; then
+    project_dir=`echo ${BASH_REMATCH[2]} | cut -d "/" -f1`
+  else
+    echo "ERROR: Not in project"
+    return 1
+  fi
+
+  project_home=$GIT_HUB_HOME/$project_dir
+
+  if [ -f "$project_home/cmake-$arch-$build_type/CMakeCache.txt" ]; then
+    echo "INFO: no need to generate buildsystem"
+    return 0
+  fi
+
+  cmake_cmd=$cmake_cmd" -DCMAKE_TOOLCHAIN_FILE=$project_home/"
+  cmake_cmd=$cmake_cmd"$arch.cmake -S $project_home -B $project_home/cmake-$arch-$build_type"
+
+  echo "INFO: execute: $cmake_cmd"
+  $cmake_cmd
+}
